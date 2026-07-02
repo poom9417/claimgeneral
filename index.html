@@ -1,0 +1,784 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ระบบพิมพ์ใบแสดงรายการเก็บค่ารักษาพยาบาล (Native Print Engine)</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Google Fonts: สารบรรณ -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;700&display=swap" rel="stylesheet">
+    
+    <!-- SheetJS สำหรับอ่านไฟล์ Excel -->
+    <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+
+    <style>
+        body {
+            background-color: #f3f4f6;
+            font-family: 'Sarabun', sans-serif;
+            margin: 0;
+            padding: 0;
+        }
+
+        .preview-page {
+            background-color: #ffffff;
+            width: 297mm;
+            height: 200mm !important; /* กำหนดความสูงพรีวิวให้ตรงกับความสูงของหน้ากระดาษสั่งพิมพ์จริงเพื่อความเสถียร */
+            padding: 5mm 4mm; 
+            margin: 0 auto 30px auto;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1);
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            border: 1px solid #e5e7eb;
+            position: relative;
+        }
+
+        .document-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 8.5px; /* ขนาดฟอนต์มาตรฐานสำหรับจัดหน้ากระดาษ 20 แถว */
+            table-layout: fixed;
+            font-family: 'Sarabun', sans-serif;
+        }
+        
+        .document-table th, .document-table td {
+            border: 1px solid #000000;
+            padding: 2px 1.5px; /* ลด Padding เริ่มต้นลงเพื่อให้ Browser เป็นผู้ยืดระยะห่างแนวตั้ง (height 100%) อย่างอิสระ */
+            text-align: center;
+            vertical-align: middle;
+            word-wrap: break-word;
+            line-height: 1.15; 
+        }
+
+        .document-table th {
+            font-weight: bold;
+            background-color: #f9fafb;
+            font-size: 8.5px;
+            padding: 3.5px 1px;
+        }
+
+        /* โหมดบีบอัดตารางชั่วคราว (เมื่อหน้าสุดท้ายยุบรวมได้ 21-23 แถว) เพื่อป้องกันไม่ให้ล้นหน้า */
+        .compact-table-body td {
+            padding: 1px 0.5px !important;
+            font-size: 7.8px !important;
+        }
+
+        .text-left { text-align: left !important; }
+        .text-right { text-align: right !important; }
+        .font-bold { font-weight: bold; }
+
+        .diag-cell, .diag-code-cell {
+            font-size: 8px !important;
+            line-height: 1.1 !important;
+            padding: 3px 2px !important;
+        }
+        .diag-cell { text-align: left !important; }
+        .diag-code-cell { text-align: center !important; }
+
+        .shrink-text {
+            font-size: 7.8px !important; 
+            line-height: 1.1 !important;
+            letter-spacing: -0.3px;
+        }
+
+        /* ป้องกันตัวเลขรวมเงินตกบรรทัด */
+        .shrink-total {
+            white-space: nowrap !important;
+            letter-spacing: -0.5px !important;
+            font-weight: bold !important;
+        }
+
+        /* ดีไซน์เส้นคู่กรอบล่างบัญชีสากลสำหรับแถวสรุปยอด */
+        .total-border {
+            border-top: 1px solid #000000 !important;
+            border-bottom: 4px double #000000 !important;
+            font-weight: bold !important;
+            background-color: #f9fafb !important;
+        }
+
+        #print-document {
+            display: none;
+        }
+
+        /* 🖨️ CSS สำหรับโหมดพิมพ์ (Print Mode) */
+        @media print {
+            html, body {
+                background-color: #ffffff !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                height: auto !important;
+                overflow: visible !important;
+            }
+
+            #dashboard-app, #loading-overlay, #custom-toast { display: none !important; }
+
+            #print-document {
+                display: block !important;
+                width: 100% !important;
+                height: auto !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                background-color: #ffffff !important;
+            }
+
+            @page {
+                size: A4 landscape;
+                margin: 5mm 4mm 5mm 4mm; /* ขอบกระดาษ 4mm ชิดขอบซ้ายขวาสุดเพื่อตารางกว้างเต็มหน้า */
+            }
+
+            .print-page {
+                background: #ffffff !important;
+                box-shadow: none !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                width: 100% !important;
+                height: 198mm !important; /* ฟิกความสูงสูงสุดไว้เพื่อบังคับตารางและ Footer ชิดล่างสุดเสมอ */
+                page-break-after: always; 
+                break-after: page;
+                display: flex;
+                flex-direction: column;
+                box-sizing: border-box;
+            }
+
+            .print-page:last-child {
+                page-break-after: avoid !important;
+                break-after: avoid !important;
+            }
+
+            .document-table { page-break-inside: auto; }
+            .document-table tr { page-break-inside: avoid !important; break-inside: avoid !important; }
+            .document-table thead { display: table-header-group !important; }
+        }
+    </style>
+</head>
+<body class="p-6">
+
+    <!-- แถบแจ้งเตือนแจ้งสถานะแบบ Custom -->
+    <div id="custom-toast" class="fixed top-5 right-5 bg-red-600 text-white px-6 py-3 rounded-lg shadow-xl z-50 transition-all duration-300 transform translate-y-[-100px] opacity-0 pointer-events-none">
+        <span id="toast-message" class="font-bold text-sm">ข้อความแจ้งเตือน</span>
+    </div>
+
+    <!-- 💻 1. DASHBOARD APPLICATION SECTION -->
+    <div id="dashboard-app" class="max-w-6xl mx-auto">
+        <div class="bg-white rounded-xl shadow-lg p-6 mb-6">
+            <h1 class="text-2xl font-bold mb-4 text-gray-800 flex items-center gap-2">
+                <svg class="w-8 h-8 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                </svg>
+                ระบบสร้างเอกสารเรียกเก็บค่ารักษาพยาบาล
+            </h1>
+            
+            <div class="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center hover:bg-gray-50 transition cursor-pointer mb-2">
+                <label for="excel-file" class="cursor-pointer flex flex-col items-center justify-center">
+                    <svg class="w-12 h-12 text-blue-500 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
+                    </svg>
+                    <span class="text-gray-600 font-semibold text-lg">คลิกที่นี่เพื่ออัปโหลดไฟล์ Excel / CSV รายงานการจองเก็บเงิน</span>
+                    <span class="text-sm text-gray-400 mt-1" id="file-name-display">โปรดเลือกไฟล์เพื่อเริ่มทำงาน</span>
+                </label>
+                <input type="file" id="excel-file" class="hidden" accept=".xlsx, .xls, .csv" onchange="handleFile(event)">
+            </div>
+        </div>
+
+        <div id="settings-section" class="bg-white rounded-xl shadow-lg p-6 mb-6 hidden">
+            <h2 class="text-lg font-bold mb-4 text-gray-700 border-b pb-2 flex items-center gap-2">
+                <svg class="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"></path>
+                </svg>
+                ตั้งค่ารายละเอียดเอกสารเบื้องต้น (โหมดจัดหน้า 20 แถวขยายขนาดตาราง)
+            </h2>
+            
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                <div>
+                    <label class="block text-sm font-bold text-gray-700 mb-1">ประเภทผู้ป่วยหลัก</label>
+                    <select id="input-patient-type" class="w-full border border-gray-300 rounded-lg p-2.5 bg-gray-50 focus:ring-2 focus:ring-blue-500">
+                        <option value="นอก">ผู้ป่วยนอก (OPD)</option>
+                        <option value="ใน">ผู้ป่วยใน (IPD)</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-sm font-bold text-gray-700 mb-1">ชื่อหน่วยงานหรือกองทุนผู้ถูกเรียกเก็บเงิน</label>
+                    <input type="text" id="input-payer-name" class="w-full border border-gray-300 rounded-lg p-2.5 bg-gray-50 focus:ring-2 focus:ring-blue-500" value="กองทุนสวัสดิการคณะแพทยศาสตร์โรงพยาบาลรามาธิบดี">
+                </div>
+            </div>
+
+            <!-- ส่วนตั้งค่าผู้เซ็นรับรอง -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4 pt-4 border-t border-gray-200">
+                <div>
+                    <label class="block text-sm font-bold text-gray-700 mb-1">ชื่อ-นามสกุล ผู้รับรองเอกสาร</label>
+                    <input type="text" id="input-signer-name" placeholder="เว้นว่างไว้เพื่อเขียนด้วยปากกาทีหลัง..." class="w-full border border-gray-300 rounded-lg p-2.5 bg-gray-50 focus:ring-2 focus:ring-blue-500" value="">
+                </div>
+                <div>
+                    <label class="block text-sm font-bold text-gray-700 mb-1">ตำแหน่ง ผู้รับรองเอกสาร</label>
+                    <select id="input-signer-position" class="w-full border border-gray-300 rounded-lg p-2.5 bg-gray-50 focus:ring-2 focus:ring-blue-500">
+                        <option value="นักวิชาการเงินและบัญชี">นักวิชาการเงินและบัญชี</option>
+                        <option value="ผู้ปฏิบัติงานบริหาร">ผู้ปฏิบัติงานบริหาร</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6 pt-4 border-t border-gray-200">
+                <div class="bg-blue-50 p-3 rounded-lg border border-blue-100">
+                    <label class="block text-xs font-semibold text-blue-600">วันที่เริ่มต้นรับบริการ (สแกนอัตโนมัติ)</label>
+                    <div id="info-start-date" class="font-bold text-lg text-blue-900 mt-1">-</div>
+                </div>
+                <div class="bg-blue-50 p-3 rounded-lg border border-blue-100">
+                    <label class="block text-xs font-semibold text-blue-600">วันที่สิ้นสุดรับบริการ (สแกนอัตโนมัติ)</label>
+                    <div id="info-end-date" class="font-bold text-lg text-blue-900 mt-1">-</div>
+                </div>
+            </div>
+
+            <div class="flex flex-wrap justify-end gap-3 border-t pt-4">
+                <button onclick="applyAndGeneratePreview()" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2.5 px-6 rounded-lg shadow-md transition flex items-center gap-2">
+                    สร้างพรีวิวเอกสาร
+                </button>
+                <button id="dashboard-print-btn" onclick="printDocument()" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2.5 px-6 rounded-lg shadow-md transition flex items-center gap-2 hidden">
+                    สั่งพิมพ์เอกสาร / PDF (<span id="btn-total-pages">-</span> หน้า)
+                </button>
+            </div>
+        </div>
+
+        <div id="preview-section" class="hidden">
+            <h3 class="text-md font-bold mb-3 text-gray-700 flex items-center gap-2">
+                <span class="inline-flex h-2 w-2 rounded-full bg-indigo-500 animate-ping"></span>
+                ตัวอย่างรูปแบบรายงาน (แสดง 3 หน้าแรกเพื่อความรวดเร็ว):
+            </h3>
+            <div class="overflow-x-auto bg-gray-400 p-6 rounded-xl shadow-inner border border-gray-500">
+                <div id="web-preview-container"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 🖨️ 2. PURE PRINT DOCUMENT SECTION -->
+    <div id="print-document"></div>
+
+    <!-- ⏳ 3. PROGRESS LOADING OVERLAY -->
+    <div id="loading-overlay" class="fixed inset-0 bg-gray-900 bg-opacity-75 z-50 flex-col items-center justify-center hidden" style="backdrop-filter: blur(4px);">
+        <div class="bg-white p-8 rounded-2xl shadow-2xl max-w-md w-full text-center mx-4">
+            <div class="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-blue-600 mx-auto mb-4"></div>
+            <h3 class="text-xl font-bold text-gray-800 mb-2">กำลังจัดเตรียมไฟล์ PDF...</h3>
+            <div class="w-full bg-gray-200 rounded-full h-2.5 mb-2">
+                <div id="loading-progress-bar" class="bg-blue-600 h-2.5 rounded-full transition-all duration-300" style="width: 10%;"></div>
+            </div>
+            <p class="text-xs text-blue-600 font-semibold" id="loading-status">กำลังประมวลผลหน้า...</p>
+        </div>
+    </div>
+
+    <!-- 📋 4. DOCUMENT HTML TEMPLATE -->
+    <template id="page-structure-template">
+        <div class="document-structure-node">
+            
+            <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; font-family: 'Sarabun', sans-serif;">
+                <div style="display: flex; gap: 15px;">
+                    <img src="https://mt.mahidol.ac.th/wp-content/uploads/home/footer/ci/2020/logo-MU_black-white.png" alt="ตรามหาวิทยาลัยมหิดล" 
+                         style="width: 70px; height: 70px; object-fit: contain;"
+                         onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                    <div style="display: none; width: 70px; height: 70px; border: 1.5px dashed #4b5563; align-items: center; justify-content: center; text-align: center; font-size: 9px; color: #4b5563; background-color: #fff; border-radius: 4px;">
+                        [ตรา<br>โรงพยาบาล]
+                    </div>
+                    <div style="text-align: left; padding-top: 2px;">
+                        <h2 style="font-size: 15.5px; font-weight: bold; margin: 0; color: #000;">
+                            <span class="node-title">ใบแสดงรายการเก็บค่ารักษาพยาบาลผู้ป่วย</span> 
+                            <span class="node-payer">ชื่อหน่วยงาน</span>
+                        </h2>
+                        <p style="font-size: 11.5px; margin: 4px 0 0 0; color: #000;" class="node-date-range">ตั้งแต่วันที่ ... ถึงวันที่ ...</p>
+                        <p style="font-size: 10.5px; margin: 2px 0 0 0; color: #1f2937;">โรงพยาบาลรามาธิบดีจักรีนฤบดินทร์ 111 หมู่14 ตำบลบางปลา สมุทรปราการ 10540</p>
+                        <p style="font-size: 10.5px; margin: 1px 0 0 0; color: #1f2937;">เลขประจำตัวผู้เสียภาษี 0994000158378 รหัสโรงพยาบาล 41373</p>
+                    </div>
+                </div>
+                <div style="text-align: right; font-size: 11.5px; font-family: 'Sarabun', sans-serif; color: #000; padding-top: 4px;">
+                    <div style="margin-bottom: 3px; font-weight: bold;">หน้าที่ <span class="node-page-number font-bold">1/1</span></div>
+                    <div>วันที่พิมพ์: <span class="node-print-time"></span></div>
+                </div>
+            </div>
+
+            <!-- 🌟 คอนเทนเนอร์หลักของหน้ากระดาษ ยืดหดตาม Flexbox เพื่อขยายตาราง 🌟 -->
+            <div style="flex-grow: 1; display: flex; flex-direction: column; justify-content: space-between;">
+                
+                <!-- กล่องตารางข้อมูลยืดได้สุดขีด -->
+                <div style="flex-grow: 1; display: flex; flex-direction: column; justify-content: flex-start;">
+                    <table class="document-table" style="height: 100%;">
+                        <thead>
+                            <tr>
+                                <th rowspan="2" style="width: 2.5%;" class="shrink-text">ที่</th>
+                                <th rowspan="2" style="width: 6.5%;">เลขที่ใบแจ้งหนี้</th>
+                                <th rowspan="2" class="text-left" style="width: 10%;">ชื่อพนักงาน/ผู้ป่วย</th>
+                                <th rowspan="2" style="width: 5.5%;">HN</th>
+                                <th rowspan="2" style="width: 7%;">เลขบัตรประชาชน</th>
+                                <th rowspan="2" style="width: 6%;">วันที่บริการ</th>
+                                <th rowspan="2" style="width: 5.5%;">วินิจฉัย<br>ICD10</th>
+                                <th rowspan="2" class="text-left" style="width: 10%;">ชื่อโรควินิจฉัย</th>
+                                <th colspan="11">ค่าบริการทางการแพทย์ (บาท)</th>
+                                <th rowspan="2" style="width: 6.3%;">รวม</th>
+                            </tr>
+                            <tr>
+                                <th style="width: 3.7%;">ห้อง/<br>อาหาร</th>
+                                <th style="width: 3.7%;">อวัยวะ<br>เทียม</th>
+                                <th style="width: 3.7%;"><span style="white-space: nowrap;">ยา</span></th>
+                                <th style="width: 3.7%;"><span style="white-space: nowrap; letter-spacing: -0.5px;">เวชภัณฑ์</span></th>
+                                <th style="width: 3.7%;">โลหิต/<br>พยาธิ</th>
+                                <th style="width: 3.7%;">รังสี<br>วิทยา</th>
+                                <th style="width: 3.7%;">วินิจฉัย<br>พิเศษ</th>
+                                <th style="width: 3.7%;">เครื่องมือ<br>แพทย์</th>
+                                <th style="width: 3.7%;">หัตถการ/<br>วิสัญญี</th>
+                                <th style="width: 3.7%;"><span style="white-space: nowrap; letter-spacing: -0.5px;">ทันตกรรม</span></th>
+                                <th style="width: 3.7%;">ค่าบริการ<br>อื่นๆ</th>
+                            </tr>
+                        </thead>
+                        <tbody class="node-table-body">
+                            <!-- แถวข้อมูล -->
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- ส่วนสรุปยอดและลายเซ็นจัดเลย์เอาต์ (บนลงล่าง) อยู่ด้านล่างสุดของตารางพอดี -->
+                <div class="node-summary-section" style="display: none; margin-top: 10px; font-family: 'Sarabun', sans-serif; font-size: 11px;">
+                    <!-- ส่วนข้อความรับรอง -->
+                    <div style="text-align: left;">
+                        <p style="margin: 0 0 4px 0;">จำนวน <span class="summary-count font-bold" style="font-size: 12px; margin: 0 4px;">0</span> ราย</p>
+                        <p style="margin: 0 0 4px 0; white-space: nowrap;">รวมเงินทั้งสิ้น <span class="summary-text-amount font-bold" style="margin-left: 4px; white-space: nowrap;">-</span></p>
+                        <p style="margin: 0; font-weight: bold;">ขอรับรองว่าค่ารักษาพยาบาลถูกต้องตามที่เรียกเก็บ</p>
+                    </div>
+                    
+                    <!-- ส่วนลายเซ็นตรงกลางด้านล่าง -->
+                    <div style="text-align: center; margin-top: 15px;">
+                        <p style="margin: 0 0 20px 0;">ลงชื่อ <span style="display:inline-block; width:130px; border-bottom: 1px dotted #000; margin: 0 5px;"></span> ผู้รับรองเอกสาร</p>
+                        <p style="margin: 0 0 4px 0;">( <span class="summary-signer-name" style="display:inline-block; min-width:140px; text-align: center;"></span> )</p>
+                        <p style="margin: 0;">ตำแหน่ง <span class="summary-signer-position" style="display:inline-block; min-width:140px; text-align: center;"></span></p>
+                    </div>
+                </div>
+                
+            </div>
+
+            <!-- Footer ด้านล่างสุดของกระดาษเสมอ -->
+            <div style="margin-top: auto; padding-top: 5px; padding-bottom: 0px; text-align: center; font-size: 10px; font-weight: bold; color: #111827; font-family: 'Sarabun', sans-serif;">
+                หน่วยบริหารลูกหนี้ โทร 02-839-6231 โทรสาร 02-839-6999
+            </div>
+        </div>
+    </template>
+
+    <!-- ⚙️ 5. SYSTEM JAVASCRIPT CONTROLLER -->
+    <script>
+        let rawExcelDataset = [];
+        let computedStartDateThai = '';
+        let computedEndDateThai = '';
+        
+        // กฎเกณฑ์หน้ากระดาษโหมด 20 แถว
+        const rowsLimitPerPage = 20; 
+        const maxRowsOnLastPageWithSummary = 14; 
+
+        // ระบบแจ้งเตือน Custom Toast
+        function showNotification(message, isSuccess = false) {
+            const toast = document.getElementById('custom-toast');
+            const toastMsg = document.getElementById('toast-message');
+            toastMsg.textContent = message;
+            if (isSuccess) {
+                toast.className = toast.className.replace('bg-red-600', 'bg-green-600');
+            } else {
+                toast.className = toast.className.replace('bg-green-600', 'bg-red-600');
+            }
+            toast.classList.remove('opacity-0', 'translate-y-[-100px]', 'pointer-events-none');
+            toast.classList.add('opacity-100', 'translate-y-0');
+            
+            setTimeout(() => {
+                toast.classList.add('opacity-0', 'translate-y-[-100px]', 'pointer-events-none');
+                toast.classList.remove('opacity-100', 'translate-y-0');
+            }, 4000);
+        }
+
+        function ArabicNumberToText(amount) {
+            if(amount === 0) return 'ศูนย์บาทถ้วน';
+            let amountStr = Math.abs(amount).toFixed(2);
+            let parts = amountStr.split('.');
+            let baht = parts[0];
+            let satang = parts[1];
+            
+            const readNumber = (numberStr) => {
+                const numText = ['ศูนย์', 'หนึ่ง', 'สอง', 'สาม', 'สี่', 'ห้า', 'หก', 'เจ็ด', 'แปด', 'เก้า'];
+                const rankText = ['', 'สิบ', 'ร้อย', 'พัน', 'หมื่น', 'แสน', 'ล้าน'];
+                let text = '';
+                let len = numberStr.length;
+                for (let i = 0; i < len; i++) {
+                    let n = parseInt(numberStr.charAt(i));
+                    let rank = len - i - 1;
+                    if (n !== 0) {
+                        if (n === 1 && rank === 0 && len > 1) {
+                            text += 'เอ็ด';
+                        } else if (n === 2 && rank === 1) {
+                            text += 'ยี่สิบ';
+                        } else if (n === 1 && rank === 1) {
+                            text += 'สิบ';
+                        } else {
+                            text += numText[n] + rankText[rank];
+                        }
+                    }
+                }
+                return text;
+            };
+            
+            let textResult = readNumber(baht) + 'บาท';
+            if (parseInt(satang) === 0) {
+                textResult += 'ถ้วน';
+            } else {
+                textResult += readNumber(satang) + 'สตางค์';
+            }
+            return textResult;
+        }
+
+        function handleFile(event) {
+            const uploadedFile = event.target.files[0];
+            if (!uploadedFile) return;
+
+            document.getElementById('file-name-display').textContent = uploadedFile.name;
+            const fileReader = new FileReader();
+            fileReader.onload = function(e) {
+                try {
+                    const arrayBufferData = new Uint8Array(e.target.result);
+                    const originalConsoleError = console.error;
+                    console.error = function(...args) {
+                        if (args[0] && typeof args[0] === 'string' && (args[0].includes('Missing Info') || args[0].includes('record 0x'))) return;
+                        originalConsoleError.apply(console, args);
+                    };
+
+                    const parsedWorkbook = XLSX.read(arrayBufferData, {type: 'array'});
+                    console.error = originalConsoleError;
+
+                    const activeWorksheet = parsedWorkbook.Sheets[parsedWorkbook.SheetNames[0]];
+                    rawExcelDataset = XLSX.utils.sheet_to_json(activeWorksheet);
+                    
+                    if(rawExcelDataset && rawExcelDataset.length > 0) {
+                        calculateDateBounds(rawExcelDataset);
+                        
+                        let pagesDataCount = 0;
+                        let currentIndex = 0;
+                        while (currentIndex < rawExcelDataset.length) {
+                            let rowsLeft = rawExcelDataset.length - currentIndex;
+                            let take = rowsLimitPerPage;
+                            if (rowsLeft <= (rowsLimitPerPage + 3)) take = rowsLeft; // ผสานเศษไม่เกิน 3 แถว
+                            currentIndex += take;
+                            pagesDataCount++;
+                        }
+                        document.getElementById('btn-total-pages').textContent = pagesDataCount;
+                        
+                        document.getElementById('settings-section').classList.remove('hidden');
+                        document.getElementById('preview-section').classList.add('hidden');
+                        document.getElementById('dashboard-print-btn').classList.add('hidden');
+                        showNotification("อัปโหลดและประมวลผลไฟล์สำเร็จ!", true);
+                    } else {
+                        showNotification("ไม่พบข้อมูลแถวในเอกสาร");
+                    }
+                } catch (error) {
+                    showNotification("เกิดข้อผิดพลาดในการเปิดไฟล์: " + error.message);
+                }
+            };
+            fileReader.readAsArrayBuffer(uploadedFile);
+        }
+
+        function calculateDateBounds(dataset) {
+            let earliestDate = null;
+            let latestDate = null;
+            dataset.forEach(row => {
+                const rawDateStr = row['pdate'];
+                if (rawDateStr) {
+                    const parts = rawDateStr.split('/');
+                    if (parts.length === 3) {
+                        const tempDate = new Date(`${parts[2]}-${parts[1]}-${parts[0]}`);
+                        if (!isNaN(tempDate.getTime())) {
+                            if (!earliestDate || tempDate < earliestDate) earliestDate = tempDate;
+                            if (!latestDate || tempDate > latestDate) latestDate = tempDate;
+                        }
+                    }
+                }
+            });
+
+            const thaiMonths = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"];
+            const formatThai = (d) => `${d.getDate()} ${thaiMonths[d.getMonth()]} พ.ศ. ${d.getFullYear() + 543}`;
+            
+            computedStartDateThai = earliestDate ? formatThai(earliestDate) : 'ไม่พบข้อมูลระบุ';
+            computedEndDateThai = latestDate ? formatThai(latestDate) : 'ไม่พบข้อมูลระบุ';
+
+            document.getElementById('info-start-date').textContent = computedStartDateThai;
+            document.getElementById('info-end-date').textContent = computedEndDateThai;
+        }
+
+        function getSystemPrintTimestamp() {
+            const now = new Date();
+            return `${String(now.getDate()).padStart(2,'0')}/${String(now.getMonth()+1).padStart(2,'0')}/${now.getFullYear()+543} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')} น.`;
+        }
+
+        function getFinanceHTML(val, isTotalColumn = false) {
+            if (val === undefined || val === null || String(val).trim() === '') return '-';
+            const num = parseFloat(val);
+            if (isNaN(num) || num === 0) return '-';
+            const str = num.toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            
+            if (isTotalColumn) {
+                // บังคับย่อข้อความและห้ามตกบรรทัด โดยประเมินจากความยาว เพื่อป้องกันตัวเลขรวมแบ่งเป็น 2 บรรทัด
+                let totalFont = '9.5px';
+                if (str.length > 8) totalFont = '8.5px';
+                if (str.length > 11) totalFont = '7px';
+                if (str.length > 14) totalFont = '6px';
+                return `<span class="shrink-total" style="font-size: ${totalFont} !important;">${str}</span>`;
+            } else {
+                // ย่อขนาดเมื่อค่าเงินเกินหลักร้อย (>= 100) ป้องกันล้นแนวตั้งและการปัดบรรทัด
+                if (Math.abs(num) < 100) {
+                    return `<span style="white-space: nowrap;">${str}</span>`;
+                } else {
+                    let textFont = '8px';
+                    if (str.length > 7) textFont = '7px';
+                    if (str.length > 10) textFont = '6px';
+                    return `<span class="shrink-text" style="font-size: ${textFont} !important; white-space: nowrap;">${str}</span>`;
+                }
+            }
+        }
+
+        function extractDiagnosticCodes(rowData) {
+            const codes = [];
+            ['diagcode', 'diagcode1', 'diagcode2', 'diagcode3', 'diagcode4', 'diagcode5', 'diagcode6'].forEach(key => {
+                if (rowData[key] && String(rowData[key]).trim() !== '') codes.push(String(rowData[key]).trim());
+            });
+            return codes.join('<br>'); 
+        }
+
+        function extractDiagnosticNames(rowData) {
+            const names = [];
+            ['diagna', 'diagna1', 'diagna2', 'diagna3', 'diagna4', 'diagna5', 'diagna6'].forEach(key => {
+                if (rowData[key] && String(rowData[key]).trim() !== '') {
+                    let str = String(rowData[key]).trim();
+                    names.push(str.length > 30 ? str.substring(0, 30) : str);
+                }
+            });
+            return names.join('<br>'); 
+        }
+
+        function applyAndGeneratePreview() {
+            compileDocumentOutput('web-preview-container', 'preview-page', true);
+            document.getElementById('preview-section').classList.remove('hidden');
+            document.getElementById('dashboard-print-btn').classList.remove('hidden');
+            document.getElementById('preview-section').scrollIntoView({ behavior: 'smooth' });
+        }
+
+        function compileDocumentOutput(targetDOMId, targetPageStyleClass, isPreviewOnly = false) {
+            const container = document.getElementById(targetDOMId);
+            container.innerHTML = ''; 
+
+            const selectedPatientType = document.getElementById('input-patient-type').value;
+            const chosenPayerText = document.getElementById('input-payer-name').value;
+            
+            const inputSignerName = document.getElementById('input-signer-name').value.trim();
+            const inputSignerPosition = document.getElementById('input-signer-position').value;
+            
+            const reportCompiledTime = getSystemPrintTimestamp();
+            const originalTemplate = document.getElementById('page-structure-template');
+
+            // 1. ระบบดึงข้อมูลและยุบรวมเศษหน้าสุดท้าย (Smart Pagination Logic ในแบบ 20 แถว)
+            let pagesData = [];
+            let currentIndex = 0;
+            while (currentIndex < rawExcelDataset.length) {
+                let rowsLeft = rawExcelDataset.length - currentIndex;
+                let take = rowsLimitPerPage; // 20
+                
+                // หากเศษหน้าสุดท้ายเหลือไม่เกิน 3 แถว (รวมแล้วอยู่ในช่วง 21-23 แถว) ให้อัดผสานรวมเข้ากับหน้าก่อนหน้าทันที
+                if (rowsLeft <= (rowsLimitPerPage + 3)) {
+                    take = rowsLeft; 
+                }
+                pagesData.push(rawExcelDataset.slice(currentIndex, currentIndex + take));
+                currentIndex += take;
+            }
+
+            const totalRenderPages = pagesData.length;
+            const limitPages = isPreviewOnly ? Math.min(3, totalRenderPages) : totalRenderPages;
+            const domFragment = document.createDocumentFragment();
+
+            let globalRowIndex = 0;
+            let sumA1=0, sumA2=0, sumA3=0, sumA4=0, sumA5=0, sumA6=0, sumA7=0, sumA8=0, sumA9=0, sumA10=0, sumA11=0, sumTotal=0;
+
+            for (let pageIdx = 0; pageIdx < limitPages; pageIdx++) {
+                const isLastActualPage = (pageIdx === totalRenderPages - 1);
+                const indexedRowItems = pagesData[pageIdx];
+                
+                const htmlClone = originalTemplate.content.cloneNode(true);
+                const wrapper = htmlClone.querySelector('.document-structure-node');
+                wrapper.className = targetPageStyleClass;
+
+                htmlClone.querySelector('.node-title').textContent = `ใบแสดงรายการเก็บค่ารักษาพยาบาลผู้ป่วย${selectedPatientType}`;
+                htmlClone.querySelector('.node-payer').textContent = chosenPayerText;
+                htmlClone.querySelector('.node-date-range').textContent = `ตั้งแต่วันที่ ${computedStartDateThai} ถึงวันที่ ${computedEndDateThai}`;
+                htmlClone.querySelector('.node-page-number').textContent = `${pageIdx + 1} / ${totalRenderPages}`;
+                htmlClone.querySelector('.node-print-time').textContent = reportCompiledTime;
+
+                const tbodyNode = htmlClone.querySelector('.node-table-body');
+
+                // บีบย่อขนาดตารางหากมีจำนวนแถวมากกว่าปกติ (21, 22, 23 แถว) เพื่อป้องกันล้น
+                if (indexedRowItems.length > (rowsLimitPerPage - 1)) {
+                    tbodyNode.classList.add('compact-table-body');
+                }
+
+                indexedRowItems.forEach(rowData => {
+                    globalRowIndex++;
+                    const trElement = document.createElement('tr');
+
+                    const compiledCodesHtml = extractDiagnosticCodes(rowData);
+                    const compiledNamesHtml = extractDiagnosticNames(rowData);
+
+                    // 🌟 ปรับปรุง Logic ดึงข้อมูล 11 ช่องแบบตรงตัวตาม samt1 ถึง samt11 🌟
+                    let v1 = parseFloat(rowData['samt1']) || 0; 
+                    let v2 = parseFloat(rowData['samt2']) || 0; 
+                    let v3 = parseFloat(rowData['samt3']) || 0; 
+                    let v4 = parseFloat(rowData['samt4']) || 0; 
+                    let v5 = parseFloat(rowData['samt5']) || 0; 
+                    let v6 = parseFloat(rowData['samt6']) || 0; 
+                    let v7 = parseFloat(rowData['samt7']) || 0; 
+                    let v8 = parseFloat(rowData['samt8']) || 0; 
+                    let v9 = parseFloat(rowData['samt9']) || 0; 
+                    let v10 = parseFloat(rowData['samt10']) || 0; 
+                    let v11 = parseFloat(rowData['samt11']) || 0; 
+
+                    // ระบบดึงข้อมูลจากชื่อคอลัมน์ภาษาไทยแบบ Fallback อัจฉริยะหากไม่พบ samt
+                    if (rowData['ค่าห้อง / อาหาร'] !== undefined) v1 = parseFloat(rowData['ค่าห้อง / อาหาร']) || 0;
+                    if (rowData['ค่าห้อง/อาหาร'] !== undefined) v1 = parseFloat(rowData['ค่าห้อง/อาหาร']) || 0;
+                    if (rowData['ค่าอวัยวะเทียม'] !== undefined) v2 = parseFloat(rowData['ค่าอวัยวะเทียม']) || 0;
+                    if (rowData['ค่ายา'] !== undefined) v3 = parseFloat(rowData['ค่ายา']) || 0;
+                    if (rowData['ค่าเวชภัณฑ์'] !== undefined) v4 = parseFloat(rowData['ค่าเวชภัณฑ์']) || 0;
+                    if (rowData['โลหิต / พยาธิ'] !== undefined) v5 = parseFloat(rowData['โลหิต / พยาธิ']) || 0;
+                    if (rowData['โลหิต/พยาธิ'] !== undefined) v5 = parseFloat(rowData['โลหิต/พยาธิ']) || 0;
+                    if (rowData['รังสีวิทยา'] !== undefined) v6 = parseFloat(rowData['รังสีวิทยา']) || 0;
+                    if (rowData['วินิจฉัยพิเศษ'] !== undefined) v7 = parseFloat(rowData['วินิจฉัยพิเศษ']) || 0;
+                    if (rowData['เครื่องมือแพทย์'] !== undefined) v8 = parseFloat(rowData['เครื่องมือแพทย์']) || 0;
+                    if (rowData['หัตถการ/วิสัญญี'] !== undefined) v9 = parseFloat(rowData['หัตถการ/วิสัญญี']) || 0;
+                    if (rowData['ทันตกรรม'] !== undefined) v10 = parseFloat(rowData['ทันตกรรม']) || 0;
+                    if (rowData['ค่าบริการอื่นๆ'] !== undefined) v11 = parseFloat(rowData['ค่าบริการอื่นๆ']) || 0;
+
+                    const rTotal = parseFloat(rowData['tamt']);
+                    const finalTamt = !isNaN(rTotal) ? rTotal : (v1+v2+v3+v4+v5+v6+v7+v8+v9+v10+v11);
+
+                    sumA1+=v1; sumA2+=v2; sumA3+=v3; sumA4+=v4; sumA5+=v5; sumA6+=v6; sumA7+=v7; sumA8+=v8; sumA9+=v9; sumA10+=v10; sumA11+=v11; sumTotal+=finalTamt;
+
+                    const pClaim = String(rowData['bil_claim_'] || '');
+                    const pName = String(rowData['name'] || '');
+                    const pHn = String(rowData['hn'] || '');
+                    const pIdCard = String(rowData['idcard'] || '');
+
+                    const claimClass = pClaim.length > 10 ? 'class="shrink-text"' : '';
+                    const nameClass = pName.length > 18 ? 'class="text-left shrink-text"' : 'class="text-left"';
+                    const hnClass = pHn.length > 8 ? 'class="shrink-text"' : '';
+                    const idCardClass = 'class="shrink-text"'; 
+
+                    trElement.innerHTML = `
+                        <td class="shrink-text font-bold">${globalRowIndex}</td>
+                        <td ${claimClass}>${pClaim}</td>
+                        <td ${nameClass}>${pName}</td>
+                        <td ${hnClass}>${pHn}</td>
+                        <td ${idCardClass}>${pIdCard}</td>
+                        <td>${rowData['pdate'] || ''}</td>
+                        <td class="diag-code-cell">${compiledCodesHtml}</td>
+                        <td class="diag-cell">${compiledNamesHtml}</td>
+                        <td class="text-right">${getFinanceHTML(v1)}</td>
+                        <td class="text-right">${getFinanceHTML(v2)}</td>
+                        <td class="text-right">${getFinanceHTML(v3)}</td>
+                        <td class="text-right">${getFinanceHTML(v4)}</td>
+                        <td class="text-right">${getFinanceHTML(v5)}</td>
+                        <td class="text-right">${getFinanceHTML(v6)}</td>
+                        <td class="text-right">${getFinanceHTML(v7)}</td>
+                        <td class="text-right">${getFinanceHTML(v8)}</td>
+                        <td class="text-right">${getFinanceHTML(v9)}</td>
+                        <td class="text-right">${getFinanceHTML(v10)}</td>
+                        <td class="text-right">${getFinanceHTML(v11)}</td>
+                        <td class="text-right font-bold">${getFinanceHTML(finalTamt, true)}</td>
+                    `;
+                    tbodyNode.appendChild(trElement);
+                });
+
+                if (isLastActualPage || (isPreviewOnly && pageIdx === limitPages - 1 && limitPages === totalRenderPages)) {
+                    const totalRow = document.createElement('tr');
+                    
+                    totalRow.innerHTML = `
+                        <td colspan="8" class="text-right total-border" style="padding-right: 15px;">รวมทั้งสิ้น</td>
+                        <td class="text-right total-border">${getFinanceHTML(sumA1, true)}</td>
+                        <td class="text-right total-border">${getFinanceHTML(sumA2, true)}</td>
+                        <td class="text-right total-border">${getFinanceHTML(sumA3, true)}</td>
+                        <td class="text-right total-border">${getFinanceHTML(sumA4, true)}</td>
+                        <td class="text-right total-border">${getFinanceHTML(sumA5, true)}</td>
+                        <td class="text-right total-border">${getFinanceHTML(sumA6, true)}</td>
+                        <td class="text-right total-border">${getFinanceHTML(sumA7, true)}</td>
+                        <td class="text-right total-border">${getFinanceHTML(sumA8, true)}</td>
+                        <td class="text-right total-border">${getFinanceHTML(sumA9, true)}</td>
+                        <td class="text-right total-border">${getFinanceHTML(sumA10, true)}</td>
+                        <td class="text-right total-border">${getFinanceHTML(sumA11, true)}</td>
+                        <td class="text-right total-border">${getFinanceHTML(sumTotal, true)}</td>
+                    `;
+                    tbodyNode.appendChild(totalRow);
+
+                    const summaryDiv = htmlClone.querySelector('.node-summary-section');
+                    summaryDiv.style.display = 'block';
+                    htmlClone.querySelector('.summary-count').textContent = rawExcelDataset.length.toLocaleString('th-TH');
+                    
+                    let textAmt = `( ${ArabicNumberToText(sumTotal)} )`;
+                    let fontSizeText = '11px';
+                    if (textAmt.length > 45) fontSizeText = '10px';
+                    if (textAmt.length > 60) fontSizeText = '9px';
+                    if (textAmt.length > 80) fontSizeText = '8.5px';
+                    if (textAmt.length > 100) fontSizeText = '8px';
+                    
+                    const summaryTextEl = htmlClone.querySelector('.summary-text-amount');
+                    summaryTextEl.textContent = textAmt;
+                    summaryTextEl.style.fontSize = fontSizeText;
+
+                    const signerNameEl = htmlClone.querySelector('.summary-signer-name');
+                    const signerPosEl = htmlClone.querySelector('.summary-signer-position');
+                    
+                    if (inputSignerName !== '') {
+                        signerNameEl.textContent = inputSignerName;
+                        signerNameEl.style.borderBottom = 'none'; 
+                        signerNameEl.style.minWidth = 'auto';     
+                        
+                        signerPosEl.textContent = inputSignerPosition;
+                        signerPosEl.style.borderBottom = 'none';  
+                        signerPosEl.style.minWidth = 'auto';
+                    } else {
+                        signerNameEl.innerHTML = '&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;'; 
+                        signerNameEl.style.borderBottom = '1px dotted #000';
+                        
+                        signerPosEl.textContent = inputSignerPosition; 
+                        signerPosEl.style.borderBottom = '1px dotted #000';
+                    }
+                }
+
+                domFragment.appendChild(htmlClone);
+            }
+
+            container.appendChild(domFragment);
+        }
+
+        // ==========================================
+        function printDocument() {
+            const overlay = document.getElementById('loading-overlay');
+            overlay.classList.remove('hidden');
+            overlay.classList.add('flex');
+            document.getElementById('loading-progress-bar').style.width = '50%';
+
+            setTimeout(() => {
+                compileDocumentOutput('print-document', 'print-page', false);
+                document.getElementById('loading-progress-bar').style.width = '100%';
+                
+                setTimeout(() => {
+                    overlay.classList.add('hidden');
+                    overlay.classList.remove('flex');
+
+                    requestAnimationFrame(() => {
+                        requestAnimationFrame(() => {
+                            window.print();
+                            setTimeout(() => { document.getElementById('print-document').innerHTML = ''; }, 3000);
+                        });
+                    });
+                }, 400);
+            }, 100);
+        }
+    </script>
+</body>
+</html>
